@@ -11,6 +11,7 @@ from tqdm import tqdm
 from config import (
     BATCH_SIZE,
     CHECKPOINT_DIR,
+    EVAL_RESIZE_RATIO,
     FOLDS,
     IMG_SIZE,
     NUM_CLASSES,
@@ -31,10 +32,30 @@ def load_model(checkpoint_path: Path, device: torch.device) -> torch.nn.Module:
     return model
 
 
+def parse_tta_sizes(value: str) -> list[int]:
+    sizes = [int(item.strip()) for item in value.split(",") if item.strip()]
+    if not sizes:
+        raise ValueError("At least one TTA size is required.")
+    return sizes
+
+
 @torch.no_grad()
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint-prefix", type=str, default="convnext_tiny")
     parser.add_argument("--img-size", type=int, default=IMG_SIZE)
+    parser.add_argument(
+        "--tta-sizes",
+        type=str,
+        default=None,
+        help="Comma-separated inference sizes, for example 256,288,320.",
+    )
+    parser.add_argument("--eval-resize-ratio", type=float, default=EVAL_RESIZE_RATIO)
+    parser.add_argument(
+        "--eval-transform-mode",
+        choices=["resize", "crop"],
+        default="crop",
+    )
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--output", type=Path, default=RESULT_FILE)
@@ -48,18 +69,11 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     image_names = read_test_names()
-    dataset = TestDataset(image_names, transform=get_eval_transform(args.img_size))
-    loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=device.type == "cuda",
-    )
+    tta_sizes = parse_tta_sizes(args.tta_sizes) if args.tta_sizes else [args.img_size]
 
     models = []
     for fold in range(FOLDS):
-        path = CHECKPOINT_DIR / f"convnext_tiny_fold{fold}_best.pth"
+        path = CHECKPOINT_DIR / f"{args.checkpoint_prefix}_fold{fold}_best.pth"
         if path.exists():
             models.append(load_model(path, device))
         else:
@@ -72,22 +86,45 @@ def main() -> None:
     if not models:
         raise FileNotFoundError("No fold checkpoints found.")
 
-    predictions: list[tuple[str, int]] = []
-    for images, names in tqdm(loader, desc="infer"):
-        images = images.to(device, non_blocking=True)
-        probs = torch.zeros(images.size(0), NUM_CLASSES, device=device)
-        for model in models:
-            logits = model(images)
-            fold_probs = F.softmax(logits, dim=1)
-            if not args.no_tta:
-                flipped_logits = model(torch.flip(images, dims=[3]))
-                fold_probs = (
-                    fold_probs + F.softmax(flipped_logits, dim=1)
-                ) / 2.0
-            probs += fold_probs
-        probs /= len(models)
-        labels = probs.argmax(dim=1).cpu().tolist()
-        predictions.extend(zip(names, labels))
+    all_probs = torch.zeros(len(image_names), NUM_CLASSES, dtype=torch.float32)
+    for size in tta_sizes:
+        dataset = TestDataset(
+            image_names,
+            transform=get_eval_transform(
+                size,
+                resize_ratio=args.eval_resize_ratio,
+                mode=args.eval_transform_mode,
+            ),
+        )
+        loader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=device.type == "cuda",
+        )
+
+        offset = 0
+        for images, names in tqdm(loader, desc=f"infer@{size}"):
+            images = images.to(device, non_blocking=True)
+            probs = torch.zeros(images.size(0), NUM_CLASSES, device=device)
+            for model in models:
+                logits = model(images)
+                fold_probs = F.softmax(logits, dim=1)
+                if not args.no_tta:
+                    flipped_logits = model(torch.flip(images, dims=[3]))
+                    fold_probs = (
+                        fold_probs + F.softmax(flipped_logits, dim=1)
+                    ) / 2.0
+                probs += fold_probs
+            probs /= len(models)
+            batch_size = images.size(0)
+            all_probs[offset : offset + batch_size] += probs.cpu()
+            offset += batch_size
+
+    all_probs /= len(tta_sizes)
+    labels = all_probs.argmax(dim=1).tolist()
+    predictions = list(zip(image_names, labels))
 
     PREDICTION_DIR.mkdir(parents=True, exist_ok=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)

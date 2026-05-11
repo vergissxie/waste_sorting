@@ -20,6 +20,7 @@ SEED = 42
 
 MODEL_NAME = "convnext_tiny"
 IMG_SIZE = 256
+EVAL_RESIZE_RATIO = 1.14
 BATCH_SIZE = 16
 NUM_WORKERS = 4
 EPOCHS = 25
@@ -27,6 +28,7 @@ LR = 3e-4
 WEIGHT_DECAY = 1e-4
 WARMUP_EPOCHS = 3
 USE_WEIGHTED_CE = True
+SAVE_METRIC = "blend"
 AMP = True
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}

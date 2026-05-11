@@ -5,7 +5,7 @@
 ## 版本说明
 
 - **V1**：早期方案与历史实验记录，主要用于验证整体方向。
-- **V2**：当前正式方案，代码入口位于 `src/`，采用 ConvNeXt Tiny + ImageNet 预训练 + 5-fold + Weighted CrossEntropy + fold ensemble + hflip TTA。
+- **V2**：在 V1 基线上按实验梯队逐步提分。当前代码优先落地低风险优化：评估裁剪、best 指标选择、多尺度 TTA。
 
 ## v1 结果
 
@@ -35,6 +35,7 @@
 - weight decay：`1e-4`
 - warmup：`3`
 - Weighted CE：开启
+- best checkpoint：按 `0.5 * val_acc + 0.5 * macro_f1` 保存
 - AMP：开启
 
 ## 项目结构
@@ -103,5 +104,13 @@ V1 方案见 [docs/项目实施方案-V1.md](docs/项目实施方案-V1.md)，V2
 
 ```powershell
 .\.venv\Scripts\python.exe src\infer.py --output result.txt
+.\.venv\Scripts\python.exe src\validate_submission.py result.txt
+```
+
+V1 优化版建议使用单独 checkpoint 前缀，避免覆盖 V1 权重：
+
+```powershell
+.\.venv\Scripts\python.exe src\train.py --checkpoint-prefix convnext_tiny_v1_opt
+.\.venv\Scripts\python.exe src\infer.py --checkpoint-prefix convnext_tiny_v1_opt --tta-sizes 256,288,320 --output result.txt
 .\.venv\Scripts\python.exe src\validate_submission.py result.txt
 ```

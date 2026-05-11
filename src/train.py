@@ -21,12 +21,14 @@ from config import (
     BATCH_SIZE,
     CHECKPOINT_DIR,
     EPOCHS,
+    EVAL_RESIZE_RATIO,
     FOLDS,
     IMG_SIZE,
     LOG_DIR,
     LR,
     NUM_CLASSES,
     NUM_WORKERS,
+    SAVE_METRIC,
     SEED,
     USE_WEIGHTED_CE,
     WARMUP_EPOCHS,
@@ -68,6 +70,16 @@ def make_class_weights(labels: list[int]) -> torch.Tensor:
     return torch.tensor(weights, dtype=torch.float32)
 
 
+def metric_value(val_acc: float, macro_f1: float, save_metric: str) -> float:
+    if save_metric == "acc":
+        return val_acc
+    if save_metric == "macro_f1":
+        return macro_f1
+    if save_metric == "blend":
+        return 0.5 * val_acc + 0.5 * macro_f1
+    raise ValueError(f"Unsupported save metric: {save_metric}")
+
+
 def train_one_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -77,10 +89,11 @@ def train_one_epoch(
     device: torch.device,
     use_amp: bool,
     max_batches: int | None = None,
-) -> float:
+) -> tuple[float, int]:
     model.train()
     total_loss = 0.0
     total = 0
+    optimizer_steps = 0
     for batch_idx, (images, labels) in enumerate(tqdm(loader, desc="train", leave=False)):
         if max_batches is not None and batch_idx >= max_batches:
             break
@@ -91,13 +104,16 @@ def train_one_epoch(
         with torch.amp.autocast("cuda", enabled=use_amp):
             logits = model(images)
             loss = criterion(logits, labels)
+        old_scale = scaler.get_scale()
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
+        if scaler.get_scale() >= old_scale:
+            optimizer_steps += 1
 
         total_loss += loss.item() * labels.size(0)
         total += labels.size(0)
-    return total_loss / max(1, total)
+    return total_loss / max(1, total), optimizer_steps
 
 
 @torch.no_grad()
@@ -152,7 +168,14 @@ def train_fold(
     train_labels = [label for _, label in train_samples]
 
     train_dataset = GarbageDataset(train_samples, get_train_transform(args.img_size))
-    val_dataset = GarbageDataset(val_samples, get_eval_transform(args.img_size))
+    val_dataset = GarbageDataset(
+        val_samples,
+        get_eval_transform(
+            args.img_size,
+            resize_ratio=args.eval_resize_ratio,
+            mode=args.eval_transform_mode,
+        ),
+    )
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -177,15 +200,16 @@ def train_fold(
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = make_scheduler(optimizer, args.epochs, args.warmup_epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-    writer = SummaryWriter(str(LOG_DIR / f"convnext_tiny_fold{fold}"))
+    checkpoint_prefix = args.checkpoint_prefix or "convnext_tiny"
+    writer = SummaryWriter(str(LOG_DIR / f"{checkpoint_prefix}_fold{fold}"))
 
-    best_acc = -math.inf
-    best_path = CHECKPOINT_DIR / f"convnext_tiny_fold{fold}_best.pth"
-    last_path = CHECKPOINT_DIR / f"convnext_tiny_fold{fold}_last.pth"
+    best_score = -math.inf
+    best_path = CHECKPOINT_DIR / f"{checkpoint_prefix}_fold{fold}_best.pth"
+    last_path = CHECKPOINT_DIR / f"{checkpoint_prefix}_fold{fold}_last.pth"
     print(f"Fold {fold}: train={len(train_dataset)}, val={len(val_dataset)}")
 
     for epoch in range(1, args.epochs + 1):
-        train_loss = train_one_epoch(
+        train_loss, optimizer_steps = train_one_epoch(
             model,
             train_loader,
             criterion,
@@ -203,29 +227,38 @@ def train_fold(
             use_amp,
             args.max_val_batches,
         )
-        scheduler.step()
+        if optimizer_steps > 0:
+            scheduler.step()
+        score = metric_value(val_acc, macro_f1, args.save_metric)
 
         writer.add_scalar("loss/train", train_loss, epoch)
         writer.add_scalar("loss/val", val_loss, epoch)
         writer.add_scalar("metric/val_acc", val_acc, epoch)
         writer.add_scalar("metric/macro_f1", macro_f1, epoch)
+        writer.add_scalar(f"metric/{args.save_metric}", score, epoch)
         print(
             f"Fold {fold} Epoch {epoch}/{args.epochs} "
             f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
-            f"val_acc={val_acc:.4f} macro_f1={macro_f1:.4f}"
+            f"val_acc={val_acc:.4f} macro_f1={macro_f1:.4f} "
+            f"{args.save_metric}={score:.4f}"
         )
 
         state = {
+            "checkpoint_prefix": checkpoint_prefix,
             "fold": fold,
             "epoch": epoch,
             "img_size": args.img_size,
+            "eval_resize_ratio": args.eval_resize_ratio,
+            "eval_transform_mode": args.eval_transform_mode,
             "state_dict": model.state_dict(),
             "val_acc": val_acc,
             "macro_f1": macro_f1,
+            "score": score,
+            "save_metric": args.save_metric,
         }
         torch.save(state, last_path)
-        if val_acc > best_acc:
-            best_acc = val_acc
+        if score > best_score:
+            best_score = score
             torch.save(state, best_path)
             print(f"Saved best checkpoint: {best_path}")
 
@@ -234,15 +267,27 @@ def train_fold(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint-prefix", type=str, default=None)
     parser.add_argument("--fold", type=int, default=None, help="Train one fold only.")
     parser.add_argument("--epochs", type=int, default=EPOCHS)
     parser.add_argument("--img-size", type=int, default=IMG_SIZE)
+    parser.add_argument("--eval-resize-ratio", type=float, default=EVAL_RESIZE_RATIO)
+    parser.add_argument(
+        "--eval-transform-mode",
+        choices=["resize", "crop"],
+        default="crop",
+    )
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--lr", type=float, default=LR)
     parser.add_argument("--weight-decay", type=float, default=WEIGHT_DECAY)
     parser.add_argument("--warmup-epochs", type=int, default=WARMUP_EPOCHS)
     parser.add_argument("--weighted-ce", action=argparse.BooleanOptionalAction, default=USE_WEIGHTED_CE)
+    parser.add_argument(
+        "--save-metric",
+        choices=["acc", "macro_f1", "blend"],
+        default=SAVE_METRIC,
+    )
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=AMP)
     parser.add_argument("--max-train-batches", type=int, default=None)
     parser.add_argument("--max-val-batches", type=int, default=None)
