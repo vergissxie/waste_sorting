@@ -9,6 +9,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 from config import (
+    EVAL_RESIZE_RATIO,
     GARBAGE_DICT_FILE,
     IMAGE_EXTENSIONS,
     IMG_SIZE,
@@ -99,10 +100,15 @@ def get_train_transform(img_size: int = IMG_SIZE) -> transforms.Compose:
     )
 
 
-def get_eval_transform(img_size: int = IMG_SIZE) -> transforms.Compose:
+def get_eval_transform(
+    img_size: int = IMG_SIZE,
+    resize_ratio: float = EVAL_RESIZE_RATIO,
+) -> transforms.Compose:
+    resize_size = max(img_size, round(img_size * resize_ratio))
     return transforms.Compose(
         [
-            transforms.Resize((img_size, img_size)),
+            transforms.Resize(resize_size),
+            transforms.CenterCrop(img_size),
             transforms.ToTensor(),
             transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
         ]
@@ -149,4 +155,3 @@ class TestDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         return image, image_name
-

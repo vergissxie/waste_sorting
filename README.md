@@ -5,7 +5,7 @@
 ## 版本说明
 
 - **V1**：早期方案与历史实验记录，主要用于验证整体方向。
-- **V2**：当前正式方案，代码入口位于 `src/`，采用 ConvNeXt Tiny + ImageNet 预训练 + 5-fold + Weighted CrossEntropy + fold ensemble + hflip TTA。
+- **V2**：当前正式方案，代码入口位于 `src/`，采用 ConvNeXt Tiny + ImageNet 预训练 + 5-fold + Weighted CrossEntropy + label smoothing + Mixup/CutMix + EMA + fold ensemble + hflip/multiscale TTA。
 
 ## v1 结果
 
@@ -35,6 +35,10 @@
 - weight decay：`1e-4`
 - warmup：`3`
 - Weighted CE：开启
+- label smoothing：`0.05`
+- Mixup/CutMix：开启
+- EMA：开启
+- best checkpoint：按 `0.5 * val_acc + 0.5 * macro_f1` 保存
 - AMP：开启
 
 ## 项目结构
@@ -104,4 +108,19 @@ V1 方案见 [docs/项目实施方案-V1.md](docs/项目实施方案-V1.md)，V2
 ```powershell
 .\.venv\Scripts\python.exe src\infer.py --output result.txt
 .\.venv\Scripts\python.exe src\validate_submission.py result.txt
+```
+
+V2 提分训练建议使用单独 checkpoint 前缀，避免覆盖 V1 权重：
+
+```powershell
+.\.venv\Scripts\python.exe src\train.py --checkpoint-prefix convnext_tiny_v2
+.\.venv\Scripts\python.exe src\infer.py --checkpoint-prefix convnext_tiny_v2 --tta-sizes 256,288,320 --output result.txt
+.\.venv\Scripts\python.exe src\validate_submission.py result.txt
+```
+
+可选第二模型融合：
+
+```powershell
+.\.venv\Scripts\python.exe src\train.py --model-name efficientnet_v2_s --checkpoint-prefix efficientnet_v2_s_v2
+.\.venv\Scripts\python.exe src\infer.py --checkpoint-prefixes convnext_tiny_v2,efficientnet_v2_s_v2 --ensemble-weights 0.6,0.4 --tta-sizes 256,288,320 --output result.txt
 ```
