@@ -22,6 +22,15 @@ data/garbage_dict.json
 data/testpath.txt
 ```
 
+## V2 对应项
+
+- `src/config.py`：当前主配置入口，适合在发布说明里明确默认超参数。
+- `src/train.py`：V2 的训练入口，替代历史 `temp/train.py` 作为主运行脚本。
+- `src/infer.py`：V2 的推理入口，输出 `result.txt`。
+- `src/validate_submission.py`：V2 的提交校验入口，建议在发布前保留。
+- `temp/`：仅作历史参考脚本，不应作为当前发布版本的主入口。
+- `docs/项目实施方案.md`：V1/V2 的入口索引页，便于快速跳转到对应版本。
+
 ## 不建议提交内容
 
 ```text
