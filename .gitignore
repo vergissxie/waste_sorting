@@ -36,6 +36,7 @@ dir_label.txt
 outputs/
 runs/
 result.txt
+result_*.txt
 *.pth
 *.pth.tar
 *.pt

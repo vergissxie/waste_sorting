@@ -127,6 +127,20 @@ def get_eval_transform(
     )
 
 
+def get_eval_center_crop_transform(
+    img_size: int = IMG_SIZE,
+    resize_size: int = 292,
+) -> transforms.Compose:
+    return transforms.Compose(
+        [
+            transforms.Resize(resize_size),
+            transforms.CenterCrop(img_size),
+            transforms.ToTensor(),
+            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+        ]
+    )
+
+
 class GarbageDataset(Dataset):
     def __init__(
         self,

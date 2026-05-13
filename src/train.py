@@ -26,10 +26,12 @@ from config import (
     IMG_SIZE,
     LOG_DIR,
     LR,
+    MODEL_NAME,
     NUM_CLASSES,
     NUM_WORKERS,
     SAVE_METRIC,
     SEED,
+    SUPPORTED_MODELS,
     USE_WEIGHTED_CE,
     WARMUP_EPOCHS,
     WEIGHT_DECAY,
@@ -94,7 +96,9 @@ def train_one_epoch(
     total_loss = 0.0
     total = 0
     optimizer_steps = 0
-    for batch_idx, (images, labels) in enumerate(tqdm(loader, desc="train", leave=False)):
+    for batch_idx, (images, labels) in enumerate(
+        tqdm(loader, desc="train", leave=False)
+    ):
         if max_batches is not None and batch_idx >= max_batches:
             break
         images = images.to(device, non_blocking=True)
@@ -131,7 +135,9 @@ def validate(
     correct = 0
     all_preds: list[int] = []
     all_labels: list[int] = []
-    for batch_idx, (images, labels) in enumerate(tqdm(loader, desc="val", leave=False)):
+    for batch_idx, (images, labels) in enumerate(
+        tqdm(loader, desc="val", leave=False)
+    ):
         if max_batches is not None and batch_idx >= max_batches:
             break
         images = images.to(device, non_blocking=True)
@@ -191,7 +197,7 @@ def train_fold(
         pin_memory=device.type == "cuda",
     )
 
-    model = create_model(pretrained=True).to(device)
+    model = create_model(model_name=args.model_name, pretrained=True).to(device)
     if args.weighted_ce:
         class_weights = make_class_weights(train_labels).to(device)
         criterion = nn.CrossEntropyLoss(weight=class_weights)
@@ -200,10 +206,17 @@ def train_fold(
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = make_scheduler(optimizer, args.epochs, args.warmup_epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-    checkpoint_prefix = args.checkpoint_prefix or "convnext_tiny"
+
+    checkpoint_prefix = args.checkpoint_prefix or args.model_name
     writer = SummaryWriter(str(LOG_DIR / f"{checkpoint_prefix}_fold{fold}"))
 
+    best_acc = -math.inf
+    best_f1 = -math.inf
+    best_blend = -math.inf
     best_score = -math.inf
+    best_acc_path = CHECKPOINT_DIR / f"{checkpoint_prefix}_fold{fold}_best_acc.pth"
+    best_f1_path = CHECKPOINT_DIR / f"{checkpoint_prefix}_fold{fold}_best_f1.pth"
+    best_blend_path = CHECKPOINT_DIR / f"{checkpoint_prefix}_fold{fold}_best_blend.pth"
     best_path = CHECKPOINT_DIR / f"{checkpoint_prefix}_fold{fold}_best.pth"
     last_path = CHECKPOINT_DIR / f"{checkpoint_prefix}_fold{fold}_last.pth"
     print(f"Fold {fold}: train={len(train_dataset)}, val={len(val_dataset)}")
@@ -230,21 +243,24 @@ def train_fold(
         if optimizer_steps > 0:
             scheduler.step()
         score = metric_value(val_acc, macro_f1, args.save_metric)
+        blend_score = metric_value(val_acc, macro_f1, "blend")
 
         writer.add_scalar("loss/train", train_loss, epoch)
         writer.add_scalar("loss/val", val_loss, epoch)
         writer.add_scalar("metric/val_acc", val_acc, epoch)
         writer.add_scalar("metric/macro_f1", macro_f1, epoch)
-        writer.add_scalar(f"metric/{args.save_metric}", score, epoch)
+        writer.add_scalar("metric/blend", blend_score, epoch)
+        writer.add_scalar("metric/save_score", score, epoch)
         print(
             f"Fold {fold} Epoch {epoch}/{args.epochs} "
             f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
             f"val_acc={val_acc:.4f} macro_f1={macro_f1:.4f} "
-            f"{args.save_metric}={score:.4f}"
+            f"blend={blend_score:.4f} save({args.save_metric})={score:.4f}"
         )
 
         state = {
             "checkpoint_prefix": checkpoint_prefix,
+            "model_name": args.model_name,
             "fold": fold,
             "epoch": epoch,
             "img_size": args.img_size,
@@ -253,14 +269,28 @@ def train_fold(
             "state_dict": model.state_dict(),
             "val_acc": val_acc,
             "macro_f1": macro_f1,
+            "blend": blend_score,
             "score": score,
             "save_metric": args.save_metric,
         }
         torch.save(state, last_path)
+
+        if val_acc > best_acc:
+            best_acc = val_acc
+            torch.save(state, best_acc_path)
+            print(f"Saved best_acc checkpoint: {best_acc_path}")
+        if macro_f1 > best_f1:
+            best_f1 = macro_f1
+            torch.save(state, best_f1_path)
+            print(f"Saved best_f1 checkpoint: {best_f1_path}")
+        if blend_score > best_blend:
+            best_blend = blend_score
+            torch.save(state, best_blend_path)
+            print(f"Saved best_blend checkpoint: {best_blend_path}")
         if score > best_score:
             best_score = score
             torch.save(state, best_path)
-            print(f"Saved best checkpoint: {best_path}")
+            print(f"Saved selected best checkpoint: {best_path}")
 
     writer.close()
 
@@ -282,13 +312,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=LR)
     parser.add_argument("--weight-decay", type=float, default=WEIGHT_DECAY)
     parser.add_argument("--warmup-epochs", type=int, default=WARMUP_EPOCHS)
-    parser.add_argument("--weighted-ce", action=argparse.BooleanOptionalAction, default=USE_WEIGHTED_CE)
+    parser.add_argument(
+        "--weighted-ce",
+        action=argparse.BooleanOptionalAction,
+        default=USE_WEIGHTED_CE,
+    )
     parser.add_argument(
         "--save-metric",
         choices=["acc", "macro_f1", "blend"],
         default=SAVE_METRIC,
     )
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=AMP)
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        choices=SUPPORTED_MODELS,
+        default=MODEL_NAME,
+    )
     parser.add_argument("--max-train-batches", type=int, default=None)
     parser.add_argument("--max-val-batches", type=int, default=None)
     parser.add_argument("--audit-only", action="store_true")

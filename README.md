@@ -1,67 +1,49 @@
 # Waste Sorting
 
-基于图像分类的垃圾分类模型项目。当前数据集按类别编号组织在 `data/train/` 下，测试图片位于 `data/test/`。当前稳定实现已经整理到 `src/`，`temp/` 仅保留为历史参考脚本。
+基于图像分类的 40 类垃圾分类项目。当前正式发布版本为 V2，稳定代码集中在 `src/`，`temp/` 仅保留为历史参考脚本。
 
-## 版本说明
+## 版本状态
 
-- **V1**：早期方案与历史实验记录，主要用于验证整体方向。
-- **V2**：在 V1 基线上按实验梯队逐步提分。当前代码优先落地低风险优化：评估裁剪、best 指标选择、多尺度 TTA。
+- **V1**：单模型 ConvNeXt Tiny 基线，平台分数 `91.75`
+- **V2**：当前正式发布版，双模型融合主线，平台分数 `92.5`
 
-## v1 结果
+## V2 发布基线
 
-- 方案：ConvNeXt Tiny ImageNet 预训练，5-fold 训练，推理阶段使用 fold ensemble + 水平翻转 TTA。
-- 本地 5-fold 平均验证准确率：`90.46%`
-- 本地 5-fold 平均 macro F1：`89.87%`
-- 平台提交分数：`91.75`
-
-## v2 当前实现
-
-- 训练入口：`src/train.py`
-- 推理入口：`src/infer.py`
-- 提交校验：`src/validate_submission.py`
-- 数据处理：`src/dataset.py`
-- 模型定义：`src/model.py`
-- 默认配置：`src/config.py`
-
-当前 `src/config.py` 默认配置：
-
-- 模型：`convnext_tiny`
-- 类别数：`40`
+- 主模型：`ConvNeXt Tiny`
+- 第二模型：`EfficientNetV2-S`
+- 训练方式：`5-fold`、`Weighted CrossEntropy`、`AdamW`、`warmup + cosine`、`AMP`
 - 输入尺寸：`256`
-- 折数：`5`
-- batch size：`16`
-- epoch：`25`
-- 学习率：`3e-4`
-- weight decay：`1e-4`
-- warmup：`3`
-- Weighted CE：开启
-- best checkpoint：按 `0.5 * val_acc + 0.5 * macro_f1` 保存
-- AMP：开启
+- 推理方式：水平翻转 TTA + 多尺度 `256,288`
+- 融合权重：`0.6 / 0.4`
+- 当前最佳提交结果：`result_e9_c6_e4_256_288.txt`（本地产物，不提交到仓库）
+
+当前发布版不纳入伪标签主线。第一轮伪标签实验 `pl1` 平台分数为 `91.75`，低于当前 `92.5` 融合基线。
 
 ## 项目结构
 
 ```text
 waste_sorting/
-  data/                  # 本地数据集，不建议直接提交到 GitHub
-  docs/                  # 项目方案、结构说明、发布检查
-  outputs/               # 模型权重、日志、预测结果
-  scripts/               # 数据准备、清理、统计等辅助脚本
-  src/                   # 当前正式源码目录
+  data/                  # 本地数据集
+  docs/                  # 方案文档、结构说明、发布检查
+  outputs/               # 权重、日志、预测结果
+  scripts/               # 辅助脚本
+  src/                   # 当前正式源码
     config.py
     dataset.py
     model.py
     train.py
     infer.py
+    ensemble_infer.py
     validate_submission.py
-  temp/                  # 历史/参考脚本，默认不再作为当前训练入口
-  requirements.txt       # Python 依赖
+  temp/                  # 历史参考脚本
+  requirements.txt
 ```
 
 详细说明见 [docs/项目结构说明.md](docs/项目结构说明.md)。
 
-## 本地环境
+## 环境安装
 
-建议使用 Python 3.9 或 3.10，并在虚拟环境中安装依赖：
+建议使用 Python 3.9 或 3.10：
 
 ```powershell
 python -m venv .venv
@@ -70,9 +52,9 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-如果需要使用 NVIDIA GPU，建议按本机 CUDA 版本从 PyTorch 官方安装对应的 `torch` 和 `torchvision` 版本。
+如果使用 NVIDIA GPU，请按本机 CUDA 版本安装匹配的 `torch` 与 `torchvision`。
 
-## 数据约定
+## 数据目录约定
 
 ```text
 data/
@@ -86,31 +68,45 @@ data/
   testpath.txt
 ```
 
-当前训练集包含 40 个类别目录，测试集约 400 张图片。`data/train/` 和 `data/test/` 默认被 `.gitignore` 忽略，避免 GitHub 仓库体积过大。
+- 训练集目录名直接对应标签 `0..39`
+- 推理输出必须严格按 `data/testpath.txt` 顺序生成
+- `result.txt` 必须恰好 `400` 行
 
-## 后续实施
+## 常用命令
 
-V1 方案见 [docs/项目实施方案-V1.md](docs/项目实施方案-V1.md)，V2 方案见 [docs/项目实施方案-V2.md](docs/项目实施方案-V2.md)。发布前检查见 [docs/GitHub发布检查.md](docs/GitHub发布检查.md)。
-
-## 训练与推理
-
-数据放好后，运行完整 5-fold 训练：
+训练 ConvNeXt Tiny：
 
 ```powershell
 .\.venv\Scripts\python.exe src\train.py
 ```
 
-生成提交文件：
+训练 EfficientNetV2-S：
 
 ```powershell
-.\.venv\Scripts\python.exe src\infer.py --output result.txt
+.\.venv\Scripts\python.exe src\train.py --model-name efficientnet_v2_s --checkpoint-prefix efficientnet_v2_s
+```
+
+单模型推理：
+
+```powershell
+.\.venv\Scripts\python.exe src\infer.py --checkpoint-prefix convnext_tiny --checkpoint-suffix best --tta-scales 256,288 --output result.txt
+```
+
+生成当前 V2 融合提交文件：
+
+```powershell
+.\.venv\Scripts\python.exe src\ensemble_infer.py --member convnext_tiny:convnext_tiny:0.6 --member efficientnet_v2_s:efficientnet_v2_s:0.4 --tta-scales 256,288 --output result.txt
 .\.venv\Scripts\python.exe src\validate_submission.py result.txt
 ```
 
-V1 优化版建议使用单独 checkpoint 前缀，避免覆盖 V1 权重：
+## 发布说明
 
-```powershell
-.\.venv\Scripts\python.exe src\train.py --checkpoint-prefix convnext_tiny_v1_opt
-.\.venv\Scripts\python.exe src\infer.py --checkpoint-prefix convnext_tiny_v1_opt --tta-sizes 256,288,320 --output result.txt
-.\.venv\Scripts\python.exe src\validate_submission.py result.txt
-```
+- 默认不提交 `data/train/`、`data/test/`、模型权重、日志和 `result*.txt`
+- `outputs/` 仅保留目录占位
+- `temp/` 保持不动，作为历史实现备份
+
+## 文档
+
+- V1 方案：[docs/项目实施方案-V1.md](docs/项目实施方案-V1.md)
+- V2 方案：[docs/项目实施方案-V2.md](docs/项目实施方案-V2.md)
+- 发布检查：[docs/GitHub发布检查.md](docs/GitHub发布检查.md)

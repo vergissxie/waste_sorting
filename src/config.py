@@ -19,6 +19,7 @@ FOLDS = 5
 SEED = 42
 
 MODEL_NAME = "convnext_tiny"
+SUPPORTED_MODELS = ("convnext_tiny", "efficientnet_v2_s")
 IMG_SIZE = 256
 EVAL_RESIZE_RATIO = 1.14
 BATCH_SIZE = 16
